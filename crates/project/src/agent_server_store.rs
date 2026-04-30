@@ -25,7 +25,6 @@ use sha2::{Digest, Sha256};
 use url::Url;
 use util::{ResultExt as _, debug_panic};
 
-use crate::ProjectEnvironment;
 use crate::agent_registry_store::{AgentRegistryStore, RegistryAgent, RegistryTargetConfig};
 
 use crate::worktree_store::WorktreeStore;
@@ -150,7 +149,6 @@ enum AgentServerStoreState {
     Local {
         node_runtime: NodeRuntime,
         fs: Arc<dyn Fs>,
-        project_environment: Entity<ProjectEnvironment>,
         downstream_client: Option<(u64, AnyProtoClient)>,
         settings: Option<AllAgentServersSettings>,
         http_client: Arc<dyn HttpClient>,
@@ -411,7 +409,6 @@ impl AgentServerStore {
         let AgentServerStoreState::Local {
             node_runtime,
             fs,
-            project_environment,
             downstream_client,
             settings: old_settings,
             http_client,
@@ -492,7 +489,6 @@ impl AgentServerStore {
                         fs: fs.clone(),
                         http_client: http_client.clone(),
                         node_runtime: node_runtime.clone(),
-                        project_environment: project_environment.clone(),
                         extension_id: Arc::from(&*entry.extension_id),
                         targets: entry.targets.clone(),
                         env,
@@ -516,7 +512,6 @@ impl AgentServerStore {
                         ExternalAgentEntry::new(
                             Box::new(LocalCustomAgent {
                                 command: command.clone(),
-                                project_environment: project_environment.clone(),
                             }) as Box<dyn ExternalAgentServer>,
                             ExternalAgentSource::Custom,
                             None,
@@ -550,7 +545,6 @@ impl AgentServerStore {
                                         fs: fs.clone(),
                                         http_client: http_client.clone(),
                                         node_runtime: node_runtime.clone(),
-                                        project_environment: project_environment.clone(),
                                         registry_id: Arc::from(name.as_str()),
                                         version: agent.metadata.version.clone(),
                                         targets: agent.targets.clone(),
@@ -571,7 +565,6 @@ impl AgentServerStore {
                                     Box::new(LocalRegistryNpxAgent {
                                         fs: fs.clone(),
                                         node_runtime: node_runtime.clone(),
-                                        project_environment: project_environment.clone(),
                                         registry_id: Arc::from(name.as_str()),
                                         version: agent.metadata.version.clone(),
                                         package: agent.package.clone(),
@@ -638,7 +631,6 @@ impl AgentServerStore {
     pub fn local(
         node_runtime: NodeRuntime,
         fs: Arc<dyn Fs>,
-        project_environment: Entity<ProjectEnvironment>,
         http_client: Arc<dyn HttpClient>,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -654,7 +646,6 @@ impl AgentServerStore {
             state: AgentServerStoreState::Local {
                 node_runtime,
                 fs,
-                project_environment,
                 http_client,
                 downstream_client: None,
                 settings: None,
@@ -1130,7 +1121,6 @@ pub struct LocalExtensionArchiveAgent {
     pub fs: Arc<dyn Fs>,
     pub http_client: Arc<dyn HttpClient>,
     pub node_runtime: NodeRuntime,
-    pub project_environment: Entity<ProjectEnvironment>,
     pub extension_id: Arc<str>,
     pub agent_id: Arc<str>,
     pub targets: HashMap<String, extension::TargetConfig>,
@@ -1161,24 +1151,14 @@ impl ExternalAgentServer for LocalExtensionArchiveAgent {
         let fs = self.fs.clone();
         let http_client = self.http_client.clone();
         let node_runtime = self.node_runtime.clone();
-        let project_environment = self.project_environment.downgrade();
         let extension_id = self.extension_id.clone();
         let agent_id = self.agent_id.clone();
         let targets = self.targets.clone();
         let base_env = self.env.clone();
         let version = self.version.clone();
 
-        cx.spawn(async move |cx| {
-            // Get project environment
-            let mut env = project_environment
-                .update(cx, |project_environment, cx| {
-                    project_environment.default_environment(cx)
-                })?
-                .await
-                .unwrap_or_default();
-
-            // Merge manifest env and extra env
-            env.extend(base_env);
+        cx.spawn(async move |_cx| {
+            let mut env = base_env;
             env.extend(extra_env);
 
             let cache_key = format!("{}/{}", extension_id, agent_id);
@@ -1325,7 +1305,6 @@ struct LocalRegistryArchiveAgent {
     fs: Arc<dyn Fs>,
     http_client: Arc<dyn HttpClient>,
     node_runtime: NodeRuntime,
-    project_environment: Entity<ProjectEnvironment>,
     registry_id: Arc<str>,
     version: SharedString,
     targets: HashMap<String, RegistryTargetConfig>,
@@ -1355,20 +1334,12 @@ impl ExternalAgentServer for LocalRegistryArchiveAgent {
         let fs = self.fs.clone();
         let http_client = self.http_client.clone();
         let node_runtime = self.node_runtime.clone();
-        let project_environment = self.project_environment.downgrade();
         let registry_id = self.registry_id.clone();
         let targets = self.targets.clone();
         let settings_env = self.env.clone();
         let version = self.version.clone();
 
-        cx.spawn(async move |cx| {
-            let mut env = project_environment
-                .update(cx, |project_environment, cx| {
-                    project_environment.default_environment(cx)
-                })?
-                .await
-                .unwrap_or_default();
-
+        cx.spawn(async move |_cx| {
             let dir = paths::external_agents_dir()
                 .join("registry")
                 .join(sanitize_path_component(&registry_id));
@@ -1405,7 +1376,7 @@ impl ExternalAgentServer for LocalRegistryArchiveAgent {
                 )
             })?;
 
-            env.extend(target_config.env.clone());
+            let mut env = target_config.env.clone();
             env.extend(extra_env);
             env.extend(settings_env);
 
@@ -1503,7 +1474,6 @@ impl ExternalAgentServer for LocalRegistryArchiveAgent {
 struct LocalRegistryNpxAgent {
     fs: Arc<dyn Fs>,
     node_runtime: NodeRuntime,
-    project_environment: Entity<ProjectEnvironment>,
     registry_id: Arc<str>,
     version: SharedString,
     package: SharedString,
@@ -1534,21 +1504,13 @@ impl ExternalAgentServer for LocalRegistryNpxAgent {
     ) -> Task<Result<AgentServerCommand>> {
         let fs = self.fs.clone();
         let node_runtime = self.node_runtime.clone();
-        let project_environment = self.project_environment.downgrade();
         let registry_id = self.registry_id.clone();
         let package = bounded_npm_package_spec(&self.package);
         let args = self.args.clone();
         let distribution_env = self.distribution_env.clone();
         let settings_env = self.settings_env.clone();
 
-        cx.spawn(async move |cx| {
-            let mut env = project_environment
-                .update(cx, |project_environment, cx| {
-                    project_environment.default_environment(cx)
-                })?
-                .await
-                .unwrap_or_default();
-
+        cx.spawn(async move |_cx| {
             let prefix_dir = paths::external_agents_dir()
                 .join("registry")
                 .join("npx")
@@ -1566,7 +1528,7 @@ impl ExternalAgentServer for LocalRegistryNpxAgent {
                 )
                 .await?;
 
-            env.extend(npm_command.env);
+            let mut env: HashMap<String, String> = npm_command.env.into_iter().collect();
             env.extend(distribution_env);
             env.extend(extra_env);
             env.extend(settings_env);
@@ -1625,7 +1587,6 @@ fn bounded_npm_package_spec(package_spec: &str) -> String {
 }
 
 struct LocalCustomAgent {
-    project_environment: Entity<ProjectEnvironment>,
     command: AgentServerCommand,
 }
 
@@ -1634,23 +1595,14 @@ impl ExternalAgentServer for LocalCustomAgent {
         &self,
         extra_args: Vec<String>,
         extra_env: HashMap<String, String>,
-        cx: &mut AsyncApp,
+        _cx: &mut AsyncApp,
     ) -> Task<Result<AgentServerCommand>> {
         let mut command = self.command.clone();
-        let project_environment = self.project_environment.downgrade();
-        cx.spawn(async move |cx| {
-            let mut env = project_environment
-                .update(cx, |project_environment, cx| {
-                    project_environment.default_environment(cx)
-                })?
-                .await
-                .unwrap_or_default();
-            env.extend(command.env.unwrap_or_default());
-            env.extend(extra_env);
-            command.env = Some(env);
-            command.args.extend(extra_args);
-            Ok(command)
-        })
+        let mut env = command.env.unwrap_or_default();
+        env.extend(extra_env);
+        command.env = Some(env);
+        command.args.extend(extra_args);
+        Task::ready(Ok(command))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -1942,7 +1894,6 @@ mod tests {
     use crate::agent_registry_store::{
         AgentRegistryStore, RegistryAgent, RegistryAgentMetadata, RegistryNpxAgent,
     };
-    use crate::worktree_store::{WorktreeIdCounter, WorktreeStore};
     use gpui::{AppContext as _, TestAppContext};
     use node_runtime::NodeRuntime;
     use settings::Settings as _;
@@ -2009,18 +1960,12 @@ mod tests {
     fn create_agent_server_store(cx: &mut TestAppContext) -> gpui::Entity<AgentServerStore> {
         cx.update(|cx| {
             let fs: Arc<dyn Fs> = fs::FakeFs::new(cx.background_executor().clone());
-            let worktree_store =
-                cx.new(|cx| WorktreeStore::local(false, fs.clone(), WorktreeIdCounter::get(cx)));
-            let project_environment = cx.new(|cx| {
-                crate::ProjectEnvironment::new(None, worktree_store.downgrade(), None, false, cx)
-            });
             let http_client = http_client::FakeHttpClient::with_404_response();
 
             cx.new(|cx| {
                 AgentServerStore::local(
                     NodeRuntime::unavailable(),
                     fs,
-                    project_environment,
                     http_client,
                     cx,
                 )
