@@ -124,6 +124,7 @@ let
             # Upstream nixpkgs may set --features=cli for newer cargo-about versions,
             # but 0.8.2 has no such feature.
             cargoBuildFeatures = [ ];
+            cargoCheckFeatures = [ ];
 
             # NOTE: can drop once upstream uses `finalAttrs` here:
             # https://github.com/NixOS/nixpkgs/blob/10214747f5e6e7cb5b9bdf9e018a3c7b3032f5af/pkgs/build-support/rust/build-rust-package/default.nix#L104
