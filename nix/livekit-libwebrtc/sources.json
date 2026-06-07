@@ -1,10 +1,10 @@
 {
     "src": {
         "args": {
-            "hash": "sha256-+PgmOZD2Fi+SC66nguixhSwDsoXi4Sz693qOZZrLXm8=",
+            "hash": "sha256-KVbw0ikSo1fkLT63zo5/GIBwUDB8QRcxubhP7pYD5vA=",
             "owner": "webrtc-sdk",
             "repo": "webrtc",
-            "rev": "624fa1dce239af785fc5fa9ca3b21b9250d3f835"
+            "rev": "a4bd28d99eb9ed3bc8e41ce7b9ce7254ee7308bd"
         },
         "fetcher": "fetchFromGitHub"
     },
