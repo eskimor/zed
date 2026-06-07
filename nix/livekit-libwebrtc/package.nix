@@ -27,7 +27,7 @@
   libxml2,
   libxslt,
   minizip,
-  ffmpeg_6,
+  ffmpeg_8,
   libepoxy,
   libgbm,
   libGL,
@@ -40,7 +40,6 @@
   libx11,
   libxi,
   pipewire,
-  xorg,
 }:
 let
   platformMap = {
@@ -75,13 +74,13 @@ let
       libxml2
       libxslt
       minizip
-      ffmpeg_6
+      ffmpeg_8
       ;
   };
 in
 stdenv.mkDerivation {
   pname = "livekit-libwebrtc";
-  version = "137-unstable-2025-11-24";
+  version = "137-unstable-2026-03-12";
 
   # libwebrtc loads libEGL/libGL at runtime via dlopen() in the Wayland
   # screencast path, so they are not visible as ordinary DT_NEEDED edges.
@@ -131,7 +130,12 @@ stdenv.mkDerivation {
     ./0001-shared-libraries.patch
     # Borrow a patch from chromium to prevent a build failure due to missing libclang libraries
     ./chromium-129-rust.patch
-  ];
+  ]
+  ++ (lib.optionals stdenv.hostPlatform.isLinux [
+    # Fix a broken build with pipewire 1.5+
+    # From https://github.com/Thaodan/tg_owt/commit/960b6b30a9c7e9e4451031c30f362fd01d2ce7c1
+    ./pipewire-1.5.patch
+  ]);
 
   postPatch = ''
     substituteInPlace .gn \
