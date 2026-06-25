@@ -783,6 +783,84 @@ fn client_capabilities_for_agent(agent_id: &AgentId) -> acp::ClientCapabilities 
         .meta(meta)
 }
 
+/// Returns true if the given environment variable key holds a path list
+/// (colon-separated on Unix, semicolon-separated on Windows) that should
+/// be concatenated rather than overwritten when merging environments.
+fn is_path_list_var(key: &str) -> bool {
+    matches!(
+        key,
+        "PATH"
+            | "LD_LIBRARY_PATH"
+            | "DYLD_LIBRARY_PATH"
+            | "DYLD_FALLBACK_LIBRARY_PATH"
+            | "LIBRARY_PATH"
+            | "PKG_CONFIG_PATH"
+            | "CPATH"
+            | "C_INCLUDE_PATH"
+            | "CPLUS_INCLUDE_PATH"
+            | "MANPATH"
+            | "INFOPATH"
+            | "XDG_DATA_DIRS"
+            | "XDG_CONFIG_DIRS"
+            | "PYTHONPATH"
+            | "NODE_PATH"
+            | "GEM_PATH"
+            | "GOPATH"
+            | "CLASSPATH"
+            | "CMAKE_PREFIX_PATH"
+    )
+}
+
+/// Merges two environments. For path-list variables (PATH, LD_LIBRARY_PATH, etc.),
+/// values are concatenated with the project environment taking precedence (prepended).
+/// For all other variables, the project environment wins over the command environment.
+fn merge_environments(
+    project_env: HashMap<String, String>,
+    command_env: HashMap<String, String>,
+) -> HashMap<String, String> {
+    let path_separator = if cfg!(windows) { ";" } else { ":" };
+
+    let mut merged = command_env;
+    for (key, project_value) in project_env {
+        if is_path_list_var(&key) {
+            if let Some(command_value) = merged.remove(&key) {
+                merged.insert(key, format!("{project_value}{path_separator}{command_value}"));
+                continue;
+            }
+        }
+        merged.insert(key, project_value);
+    }
+    merged
+}
+
+/// Resolves the project environment (e.g. from direnv), merges it with the
+/// command's own env, and returns the combined environment along with
+/// the working directory.
+async fn resolve_local_env(
+    project: &Entity<Project>,
+    command_env: HashMap<String, String>,
+    cx: &mut AsyncApp,
+) -> (HashMap<String, String>, Option<PathBuf>) {
+    let (env_task, cwd) = project.update(cx, |project, cx| {
+        let env_task = project
+            .environment()
+            .update(cx, |env, cx| env.default_environment(cx));
+        let cwd = if project.is_local() {
+            project
+                .default_path_list(cx)
+                .ordered_paths()
+                .next()
+                .cloned()
+        } else {
+            None
+        };
+        (env_task, cwd)
+    });
+    let project_env = env_task.await.unwrap_or_default();
+    let env = merge_environments(project_env, command_env);
+    (env, cwd)
+}
+
 impl AcpConnection {
     pub fn subscribe_debug_messages(
         &self,
@@ -802,49 +880,54 @@ impl AcpConnection {
         default_config_options: HashMap<String, String>,
         cx: &mut AsyncApp,
     ) -> Result<Self> {
-        let root_dir = project.read_with(cx, |project, cx| {
-            project
+        let original_command = command.clone();
+
+        // For remote projects, use the remote client to build the command.
+        // For local projects, resolve the project environment (e.g. from direnv)
+        // and merge it with the command's own environment, concatenating PATH-like
+        // variables instead of overwriting them.
+        let remote_command = project.read_with(cx, |project, cx| {
+            let root_dir = project
                 .default_path_list(cx)
                 .ordered_paths()
                 .next()
-                .cloned()
-        });
-        let original_command = command.clone();
-        let (path, args, env) = project
-            .read_with(cx, |project, cx| {
-                project.remote_client().and_then(|client| {
-                    let template = client
-                        .read(cx)
-                        .build_command(
-                            Some(command.path.display().to_string()),
-                            &command.args,
-                            &command.env.clone().into_iter().flatten().collect(),
-                            root_dir.as_ref().map(|path| path.display().to_string()),
-                            None,
-                            Interactive::No,
-                        )
-                        .log_err()?;
-                    Some((template.program, template.args, template.env))
-                })
+                .cloned();
+            project.remote_client().and_then(|client| {
+                let template = client
+                    .read(cx)
+                    .build_command(
+                        Some(command.path.display().to_string()),
+                        &command.args,
+                        &command.env.clone().into_iter().flatten().collect(),
+                        root_dir.as_ref().map(|path| path.display().to_string()),
+                        None,
+                        Interactive::No,
+                    )
+                    .log_err()?;
+                Some((template.program, template.args, template.env, root_dir))
             })
-            .unwrap_or_else(|| {
-                (
-                    command.path.display().to_string(),
-                    command.args,
-                    command.env.unwrap_or_default(),
-                )
+        });
+
+        let (path, args, env, cwd) = if let Some((path, args, env, root_dir)) = remote_command {
+            let cwd = project.read_with(cx, |project, _cx| {
+                if project.is_local() {
+                    root_dir
+                } else {
+                    None
+                }
             });
+            (path, args, env, cwd)
+        } else {
+            let command_env: HashMap<String, String> =
+                command.env.into_iter().flatten().collect();
+            let (env, cwd) = resolve_local_env(&project, command_env, cx).await;
+            (command.path.display().to_string(), command.args, env, cwd)
+        };
 
         let builder = ShellBuilder::new(&Shell::System, cfg!(windows)).non_interactive();
         let mut child = builder.build_std_command(Some(path.clone()), &args);
         child.envs(env.clone());
-        if let Some(cwd) = project.read_with(cx, |project, _cx| {
-            if project.is_local() {
-                root_dir.as_ref()
-            } else {
-                None
-            }
-        }) {
+        if let Some(cwd) = cwd {
             child.current_dir(cwd);
         }
         let mut child = Child::spawn(child, Stdio::piped(), Stdio::piped(), Stdio::piped())?;
