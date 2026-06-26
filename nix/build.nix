@@ -122,8 +122,11 @@ let
 
             cargoHash = "sha256-NnocSs6UkuF/mCM3lIdFk+r51Iz2bHuYzMT/gEbT/nk=";
 
-            # 0.8.2 predates the `cli` feature that nixpkgs now enables by default
-            buildFeatures = [ ];
+            # 0.8.2 predates the `cli` feature that nixpkgs now enables by default.
+            # Must override cargoBuildFeatures (not buildFeatures) because
+            # buildRustPackage already mapped buildFeatures -> cargoBuildFeatures
+            # before overrideAttrs runs.
+            cargoBuildFeatures = [ ];
 
             # NOTE: can drop once upstream uses `finalAttrs` here:
             # https://github.com/NixOS/nixpkgs/blob/10214747f5e6e7cb5b9bdf9e018a3c7b3032f5af/pkgs/build-support/rust/build-rust-package/default.nix#L104
