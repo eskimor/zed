@@ -1424,7 +1424,20 @@ impl ExternalAgentServer for LocalRegistryNpxAgent {
                 node_runtime::read_package_executable(node_modules_dir, package_name).await?;
 
             let node_binary = node_runtime.binary_path().await?;
+            let project_path = env.get("PATH").cloned();
             env.extend(node_runtime::npm_command_env(&node_binary));
+            // `npm_command_env` derives PATH from Zed's own process environment, which would
+            // drop entries contributed by the project environment (e.g. direnv).
+            if let Some(project_path) = project_path
+                && let Some(node_bin_dir) = node_binary.parent()
+                && let Some(path) = std::env::join_paths(
+                    std::iter::once(node_bin_dir.to_path_buf())
+                        .chain(std::env::split_paths(&project_path)),
+                )
+                .log_err()
+            {
+                env.insert("PATH".to_owned(), path.to_string_lossy().into_owned());
+            }
             env.extend(distribution_env);
             env.extend(extra_env);
             env.extend(settings_env);
